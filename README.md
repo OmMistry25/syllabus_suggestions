@@ -87,4 +87,4 @@ If you want to contact the maintainer of this project, please email [your-email@
 
 ## License
 
-This project uses the following license: [MIT License](https://opensource.org/licenses/MIT).
+This project uses the following license: GPL-3.0 license.
