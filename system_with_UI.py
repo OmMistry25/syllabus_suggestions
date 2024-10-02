@@ -12,6 +12,23 @@ from flask import Flask, request, jsonify, session
 from flask import Flask, request, jsonify, render_template_string
 import random
 from datetime import datetime, timedelta
+import functools
+import traceback
+from flask import Flask, request, jsonify, render_template_string
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from collections import Counter
+
+def log_exceptions(f):
+    @functools.wraps(f)
+    def wrapper(*args, **kwargs):
+        try:
+            return f(*args, **kwargs)
+        except Exception as e:
+            print(f"Exception in {f.__name__}: {str(e)}")
+            traceback.print_exc()
+            return f"<h2>Error:</h2><p>An unexpected error occurred. Please try again later. Error details: {str(e)}</p>"
+    return wrapper
 
 app = Flask(__name__)
 app.secret_key = 'bdccd44f9842c6f62cdd05cba47b7da861de0b662ec3fe24'  # Replace with a real secret key
@@ -38,7 +55,7 @@ class Course:
 
     def parse_grading_structure(self, syllabus):
         grading_structure = {}
-        if "Grading:" in syllabus:
+        if syllabus and isinstance(syllabus, str) and "Grading:" in syllabus:
             grading_section = syllabus.split("Grading:")[1].split("\n\n")[0]
             for line in grading_section.split("\n"):
                 parts = line.split(":")
@@ -57,6 +74,42 @@ class CanvasIntegration:
     def __init__(self, canvas_url: str, access_token: str):
         self.canvas_url = canvas_url
         self.headers = {'Authorization': f'Bearer {access_token}'}
+
+    def get_course_details(self, course_id: str):
+        details = {}
+        
+        # Get assignments
+        assignments_url = f'{self.canvas_url}/api/v1/courses/{course_id}/assignments'
+        response = requests.get(assignments_url, headers=self.headers)
+        if response.status_code == 200:
+            details['assignments'] = response.json()
+
+        # Get announcements
+        announcements_url = f'{self.canvas_url}/api/v1/courses/{course_id}/announcements'
+        response = requests.get(announcements_url, headers=self.headers)
+        if response.status_code == 200:
+            details['announcements'] = response.json()
+
+        # Get modules
+        modules_url = f'{self.canvas_url}/api/v1/courses/{course_id}/modules'
+        response = requests.get(modules_url, headers=self.headers)
+        if response.status_code == 200:
+            details['modules'] = response.json()
+
+        # Get grades
+        grades_url = f'{self.canvas_url}/api/v1/courses/{course_id}/students/submissions'
+        response = requests.get(grades_url, headers=self.headers)
+        if response.status_code == 200:
+            details['grades'] = response.json()
+
+        return details
+
+    def get_dashboard_data(self):
+        dashboard_url = f'{self.canvas_url}/api/v1/dashboard/dashboard_cards'
+        response = requests.get(dashboard_url, headers=self.headers)
+        if response.status_code == 200:
+            return response.json()
+        return []
 
     def get_courses(self):
         all_courses = []
@@ -115,92 +168,56 @@ class CanvasIntegration:
             raise Exception(f"Failed to get calendar events: {response.status_code}")
 
 class IntelligentSuggestionGenerator:
-    def __init__(self):
-        self.encouragement_phrases = [
-            "You're doing great!",
-            "Keep up the good work!",
-            "You've got this!",
-            "Believe in yourself!",
-            "Every step forward is progress!"
-        ]
-
-    def generate_suggestions(self, courses, assignments, calendar_events):
+    def generate_suggestions(self, courses, course_details, dashboard_data, calendar_events):
         suggestions = []
+        now = datetime.now(ZoneInfo("UTC"))
 
-        # Count upcoming assignments
-        upcoming_assignments = [a for a in assignments if datetime.strptime(a['due_date'], '%Y-%m-%d') > datetime.now()]
-        num_upcoming = len(upcoming_assignments)
-
-        # Workload assessment
-        if num_upcoming == 0:
-            suggestions.append("You have no upcoming assignments. Great job staying on top of your work!")
-        elif num_upcoming <= 2:
-            suggestions.append(f"You have only {num_upcoming} assignments due soon. This is a great opportunity to get ahead in your studies or focus on other aspects of your life!")
-        elif num_upcoming <= 5:
-            suggestions.append(f"You have {num_upcoming} upcoming assignments. Consider creating a schedule to manage your time effectively.")
-        else:
-            suggestions.append(f"You have {num_upcoming} upcoming assignments. It might be a busy period - remember to take breaks and manage your stress levels.")
-
-        # Time management
-        if num_upcoming > 0:
-            earliest_due = min(assignments, key=lambda x: datetime.strptime(x['due_date'], '%Y-%m-%d'))
-            days_until_due = (datetime.strptime(earliest_due['due_date'], '%Y-%m-%d') - datetime.now()).days
-            if days_until_due <= 3:
-                suggestions.append(f"Your next assignment is due soon! Consider prioritizing '{earliest_due['name']}' for {earliest_due['course']}.")
-            elif days_until_due <= 7:
-                suggestions.append(f"You have about a week until your next assignment is due. This is a good time to start working on '{earliest_due['name']}' for {earliest_due['course']}.")
-
-        # Course engagement
         for course in courses:
-            if course.total_students > 50:
-                suggestions.append(f"'{course.name}' is a large class. Consider forming study groups or attending office hours to get more personalized attention.")
+            course_data = course_details.get(course.course_id, {})
+            
+            # Check for upcoming assignments
+            upcoming_assignments = [
+                a for a in course_data.get('assignments', [])
+                if a['due_at'] and self.parse_datetime(a['due_at']) > now
+            ]
+            if upcoming_assignments:
+                next_assignment = min(upcoming_assignments, key=lambda x: self.parse_datetime(x['due_at']))
+                suggestions.append(f"Your next assignment for {course.name} is '{next_assignment['name']}' due on {next_assignment['due_at'][:10]}. Start working on it soon!")
 
-        # Work-life balance
-        if datetime.now().weekday() >= 5:  # Weekend
-            suggestions.append("It's the weekend! While it's good to stay on top of your studies, don't forget to relax and recharge.")
-        
-        # Random encouragement
-        suggestions.append(random.choice(self.encouragement_phrases))
+            # Check module progress
+            incomplete_modules = [m for m in course_data.get('modules', []) if not m.get('completed')]
+            if incomplete_modules:
+                suggestions.append(f"You have {len(incomplete_modules)} incomplete modules in {course.name}. Try to complete at least one this week.")
 
-        # Calendar-based suggestions
-        upcoming_events = [e for e in calendar_events if e.get('start_at') and datetime.strptime(e['start_at'][:10], '%Y-%m-%d') > datetime.now()]
-        if upcoming_events:
-            next_event = min(upcoming_events, key=lambda x: datetime.strptime(x['start_at'][:10], '%Y-%m-%d'))
-            suggestions.append(f"Your next event is '{next_event.get('title', 'Unnamed Event')}' on {next_event['start_at'][:10]}. Make sure you're prepared!")
+            # Check recent announcements
+            recent_announcements = [
+                a for a in course_data.get('announcements', [])
+                if self.parse_datetime(a['posted_at']) > now - timedelta(days=7)
+            ]
+            if recent_announcements:
+                suggestions.append(f"There are {len(recent_announcements)} recent announcements in {course.name}. Make sure to read them for important updates.")
 
-        # Grading structure-based suggestions
-        for course in courses:
-            for assignment in assignments:
-                if assignment['course'] == course.name:
-                    for component, percentage in course.grading_structure.items():
-                        if component.lower() in assignment['name'].lower():
-                            suggestions.append(f"The upcoming '{assignment['name']}' for {course.name} is worth {percentage}% of your final grade. Plan your time accordingly!")
+            # Analyze grades
+            low_grades = [g for g in course_data.get('grades', []) if g['score'] and g['score'] < 70]
+            if low_grades:
+                suggestions.append(f"You have {len(low_grades)} assignments with grades below 70% in {course.name}. Consider reviewing these topics or seeking help.")
 
-        # Workload distribution
-        weekly_workload = {}
-        for assignment in assignments:
-            week = datetime.strptime(assignment['due_date'], '%Y-%m-%d').isocalendar()[1]
-            weekly_workload[week] = weekly_workload.get(week, 0) + 1
-        if weekly_workload:
-            busiest_week = max(weekly_workload, key=weekly_workload.get)
-            suggestions.append(f"Week {busiest_week} seems to be your busiest with {weekly_workload[busiest_week]} assignments due. Start preparing early!")
+        # Analyze calendar for busy periods
+        event_dates = [self.parse_datetime(e['start_at']).date() for e in calendar_events if e.get('start_at')]
+        date_counts = Counter(event_dates)
+        busy_days = [date for date, count in date_counts.items() if count > 2]
+        if busy_days:
+            suggestions.append(f"You have busy days coming up on {', '.join(d.strftime('%Y-%m-%d') for d in busy_days[:3])}. Plan your time carefully!")
 
-        # Exam preparation
-        for event in upcoming_events:
-            if 'exam' in event.get('title', '').lower():
-                exam_date = datetime.strptime(event['start_at'][:10], '%Y-%m-%d')
-                days_until_exam = (exam_date - datetime.now()).days
-                if days_until_exam <= 14:
-                    suggestions.append(f"You have an exam ({event['title']}) in {days_until_exam} days. Start reviewing your notes and practice problems!")
-
-        # If no suggestions were generated, add a default one
-        if not suggestions:
-            suggestions.append("No specific suggestions at this time. Keep up with your regular study habits!")
-
-        # Random encouragement
-        suggestions.append(random.choice(self.encouragement_phrases))
+        # Check dashboard for to-do items
+        todo_items = [card for card in dashboard_data if card.get('todo_date')]
+        if todo_items:
+            suggestions.append(f"You have {len(todo_items)} items on your to-do list. Try to complete at least one today!")
 
         return suggestions
+
+    def parse_datetime(self, date_string):
+        return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
 
 class ScheduleSuggestionSystem:
     def __init__(self):
@@ -222,34 +239,15 @@ class ScheduleSuggestionSystem:
         return summary
 
     def generate_suggestions(self, student: Student) -> List[str]:
-        suggestion_generator = IntelligentSuggestionGenerator()
-        
-        assignments = []
+        course_details = {}
         for course in student.courses:
-            try:
-                course_assignments = self.canvas.get_course_assignments(course.course_id)
-                if course_assignments is not None:
-                    for assignment in course_assignments:
-                        due_at = assignment.get('due_at')
-                        if due_at:
-                            assignments.append({
-                                'course': course.name,
-                                'name': assignment.get('name', 'Unnamed Assignment'),
-                                'due_date': due_at[:10]
-                            })
-            except Exception as e:
-                print(f"Error fetching assignments for course {course.name}: {str(e)}")
+            course_details[course.course_id] = self.canvas.get_course_details(course.course_id)
 
-        start_date = datetime.now()
-        end_date = start_date + timedelta(days=30)  # Get events for the next 30 days
-        
-        try:
-            calendar_events = self.canvas.get_calendar_events(start_date, end_date)
-        except Exception as e:
-            print(f"Error fetching calendar events: {str(e)}")
-            calendar_events = []
+        dashboard_data = self.canvas.get_dashboard_data()
+        calendar_events = self.canvas.get_calendar_events(datetime.now(), datetime.now() + timedelta(days=30))
 
-        return suggestion_generator.generate_suggestions(student.courses or [], assignments or [], calendar_events or [])
+        suggestion_generator = IntelligentSuggestionGenerator()
+        return suggestion_generator.generate_suggestions(student.courses, course_details, dashboard_data, calendar_events)
 system = ScheduleSuggestionSystem()
 
 @app.route('/')
@@ -280,27 +278,42 @@ def get_courses():
         return f"<h2>Error:</h2><p>{str(e)}</p>"
     
 @app.route('/get_suggestions')
+@log_exceptions
 def get_suggestions():
-    try:
-        student = Student("Test Student", "test@example.com")
-        
-        canvas_courses = system.get_canvas_courses()
-        for canvas_course in canvas_courses:
-            course = Course(
-                canvas_course.get('name', 'Unnamed Course'),
-                canvas_course.get('id', 'No ID'),
-                canvas_course
-            )
-            student.courses.append(course)
+    print("Starting get_suggestions route")
+    student = Student("Test Student", "test@example.com")
+    
+    print("Fetching Canvas courses")
+    canvas_courses = system.get_canvas_courses()
+    print(f"Number of Canvas courses: {len(canvas_courses)}")
+    
+    if not canvas_courses:
+        return "<h2>No courses found</h2><p>Unable to retrieve courses from Canvas.</p>"
 
-        suggestions = system.generate_suggestions(student)
-        suggestion_list = "<ul>"
-        for suggestion in suggestions:
-            suggestion_list += f"<li>{suggestion}</li>"
-        suggestion_list += "</ul>"
-        return f"<h2>Your Personalized Suggestions:</h2>{suggestion_list}"
-    except Exception as e:
-        return f"<h2>Error:</h2><p>{str(e)}</p>"
+    print("Creating Course objects")
+    for canvas_course in canvas_courses:
+        print(f"Processing course: {canvas_course.get('name', 'Unnamed Course')}")
+        print(f"Course data: {canvas_course}")
+        course = Course(
+            canvas_course.get('name', 'Unnamed Course'),
+            str(canvas_course.get('id', 'No ID')),
+            canvas_course
+        )
+        student.courses.append(course)
+    print(f"Number of student courses: {len(student.courses)}")
+
+    print("Generating suggestions")
+    suggestions = system.generate_suggestions(student)
+    print(f"Number of generated suggestions: {len(suggestions)}")
+
+    if not suggestions:
+        return "<h2>No suggestions available</h2><p>Unable to generate suggestions at this time.</p>"
+
+    suggestion_list = "<ul>"
+    for suggestion in suggestions:
+        suggestion_list += f"<li>{suggestion}</li>"
+    suggestion_list += "</ul>"
+    return f"<h2>Your Personalized Suggestions:</h2>{suggestion_list}"
     
 if __name__ == '__main__':
     app.run(debug=True)
