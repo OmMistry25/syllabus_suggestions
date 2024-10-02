@@ -2,6 +2,10 @@
 
 This Python-based Schedule Suggestion System parses course syllabi in PDF format and generates personalized scheduling suggestions for students.
 
+## Demo Video
+
+[Click here to view the demo](test 2.mov)
+
 ## Features
 
 - Parse PDF syllabi to extract course schedules and assignments
