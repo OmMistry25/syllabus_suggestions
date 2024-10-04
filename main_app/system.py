@@ -38,9 +38,14 @@ import json
 from flask_cors import CORS
 import traceback
 from flask import current_app as app
+# Update your existing get_suggestions route
+import json
+from datetime import datetime, timedelta
+import requests
+from flask import jsonify
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "http://localhost:8080"}})# This will enable CORS for all routes
+CORS(app, resources={r"/*": {"origins": "https://localhost:8080"}})# This will enable CORS for all routes
 app.secret_key = 'bdccd44f9842c6f62cdd05cba47b7da861de0b662ec3fe24' 
 
 def log_exceptions(f):
@@ -289,37 +294,40 @@ from zoneinfo import ZoneInfo
 from collections import Counter, defaultdict
 import statistics
 
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from collections import Counter, defaultdict
+import statistics
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from collections import Counter, defaultdict
+import statistics
+
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
+from collections import Counter, defaultdict
+import statistics
+
 class EnhancedSuggestionGenerator:
     def generate_suggestions(self, courses, course_details, dashboard_data, calendar_events, user_analytics):
-        suggestions = []
+        suggestions = {
+            "Workload": [],
+            "Performance": [],
+            "Course-specific": [],
+            "Calendar": [],
+            "Learning": []
+        }
         now = datetime.now(ZoneInfo("UTC"))
         
-        # Analyze overall workload and time management
-        workload_suggestion = self._analyze_workload(courses, course_details, calendar_events, now)
-        if workload_suggestion:
-            suggestions.append(workload_suggestion)
-        
-        # Analyze performance trends
-        performance_suggestion = self._analyze_performance_trends(courses, course_details)
-        if performance_suggestion:
-            suggestions.append(performance_suggestion)
-        
-        # Course-specific suggestions
-        for course in courses:
-            course_data = course_details.get(course.course_id, {})
-            course_analytics = user_analytics.get(course.course_id, {})
-            
-            course_suggestions = self._generate_course_suggestions(course, course_data, course_analytics, now)
-            suggestions.extend(course_suggestions)
-        
-        # Learning style and resource suggestions
-        learning_suggestion = self._generate_learning_suggestion(user_analytics, courses)
-        if learning_suggestion:
-            suggestions.append(learning_suggestion)
+        self._analyze_workload(courses, course_details, calendar_events, now, suggestions)
+        self._analyze_performance_trends(courses, course_details, suggestions)
+        self._analyze_calendar_conflicts(courses, course_details, calendar_events, now, suggestions)
+        self._generate_learning_suggestion(user_analytics, courses, suggestions)
         
         return suggestions
 
-    def _analyze_workload(self, courses, course_details, calendar_events, now):
+    def _analyze_workload(self, courses, course_details, calendar_events, now, suggestions):
         upcoming_assignments = defaultdict(list)
         for course in courses:
             course_data = course_details.get(course.course_id, {})
@@ -329,7 +337,8 @@ class EnhancedSuggestionGenerator:
                     upcoming_assignments[course.name].append((assignment.get('name', 'Unnamed'), due_date))
         
         if not upcoming_assignments:
-            return "You don't have any upcoming assignments. This might be a good time to review past material or work on long-term projects."
+            suggestions["Workload"].append("You don't have any upcoming assignments. This might be a good time to review past material or work on long-term projects.")
+            return
         
         busy_courses = sorted(upcoming_assignments.items(), key=lambda x: len(x[1]), reverse=True)
         busiest_course, busiest_assignments = busy_courses[0]
@@ -337,15 +346,57 @@ class EnhancedSuggestionGenerator:
         next_week = now + timedelta(days=7)
         next_week_assignments = sum(1 for assignments in upcoming_assignments.values() for _, due_date in assignments if due_date <= next_week)
         
-        suggestion = f"You have {next_week_assignments} assignments due in the next week. "
-        suggestion += f"The course with the most upcoming work is {busiest_course} with {len(busiest_assignments)} assignments. "
+        suggestions["Workload"].append(f"You have {next_week_assignments} assignments due in the next week.")
+        suggestions["Workload"].append(f"Focus on {busiest_course} as it has the most upcoming work with {len(busiest_assignments)} assignments.")
         
         if len(busy_courses) > 1:
-            suggestion += f"Consider allocating more time for {busiest_course} and {busy_courses[1][0]}. "
-        
-        return suggestion + "Create a detailed schedule to manage your workload effectively."
+            suggestions["Workload"].append(f"Also allocate time for {busy_courses[1][0]} which has {len(busy_courses[1][1])} upcoming assignments.")
 
-    def _analyze_performance_trends(self, courses, course_details):
+    def _analyze_calendar_conflicts(self, courses, course_details, calendar_events, now, suggestions):
+        today_events = [e for e in calendar_events if self.parse_datetime(e['start'].get('dateTime', e['start'].get('date'))).date() == now.date()]
+        today_events.sort(key=lambda x: self.parse_datetime(x['start'].get('dateTime', x['start'].get('date'))))
+        
+        class_count = sum(1 for e in today_events if any(course.name.lower() in e.get('summary', '').lower() for course in courses))
+        meeting_count = sum(1 for e in today_events if 'meeting' in e.get('summary', '').lower())
+        
+        suggestions["Calendar"].append(f"Today you have {class_count} classes and {meeting_count} meetings.")
+        
+        free_slots = self._find_free_time_slots(today_events, now)
+        
+        for course in courses:
+            course_data = course_details.get(course.course_id, {})
+            urgent_assignments = [a for a in course_data.get('assignments', []) if self.parse_datetime(a.get('due_at', '')) and self.parse_datetime(a.get('due_at', '')).date() == now.date()]
+            
+            for assignment in urgent_assignments:
+                due_time = self.parse_datetime(assignment.get('due_at', ''))
+                suitable_slots = [slot for slot in free_slots if slot[1] <= due_time]
+                
+                if suitable_slots:
+                    best_slot = max(suitable_slots, key=lambda x: x[1] - x[0])
+                    start_time = best_slot[0].strftime("%I:%M %p")
+                    end_time = best_slot[1].strftime("%I:%M %p")
+                    suggestions["Course-specific"].append(f"Urgent for {course.name}: '{assignment['name']}' is due today. Try to work on it between {start_time} and {end_time}.")
+                else:
+                    suggestions["Course-specific"].append(f"Urgent for {course.name}: '{assignment['name']}' is due today. Find any available time to complete it as soon as possible.")
+
+    def _find_free_time_slots(self, events, now):
+        busy_times = [(self.parse_datetime(e['start'].get('dateTime', e['start'].get('date'))),
+                       self.parse_datetime(e['end'].get('dateTime', e['end'].get('date')))) for e in events]
+        busy_times.sort(key=lambda x: x[0])
+        
+        free_slots = []
+        current_time = now
+        for start, end in busy_times:
+            if current_time < start:
+                free_slots.append((current_time, start))
+            current_time = max(current_time, end)
+        
+        if current_time < now.replace(hour=23, minute=59, second=59):
+            free_slots.append((current_time, now.replace(hour=23, minute=59, second=59)))
+        
+        return free_slots
+
+    def _analyze_performance_trends(self, courses, course_details, suggestions):
         course_averages = {}
         for course in courses:
             course_data = course_details.get(course.course_id, {})
@@ -354,43 +405,17 @@ class EnhancedSuggestionGenerator:
                 course_averages[course.name] = statistics.mean(grades)
         
         if not course_averages:
-            return None
+            suggestions["Performance"].append("No grade data available. Keep track of your grades as they come in to monitor your progress.")
+            return
         
         best_course = max(course_averages, key=course_averages.get)
         worst_course = min(course_averages, key=course_averages.get)
         
-        suggestion = f"Your strongest performance is in {best_course} (avg: {course_averages[best_course]:.2f}%). "
-        suggestion += f"You might want to focus more on {worst_course} (avg: {course_averages[worst_course]:.2f}%). "
-        suggestion += "Consider applying your successful strategies from your strongest course to improve in other areas."
-        
-        return suggestion
+        suggestions["Performance"].append(f"Your strongest performance is in {best_course} (avg: {course_averages[best_course]:.2f}%).")
+        suggestions["Performance"].append(f"Focus on improving your performance in {worst_course} (avg: {course_averages[worst_course]:.2f}%).")
+        suggestions["Performance"].append(f"Consider applying study strategies from {best_course} to {worst_course} to boost your performance.")
 
-    def _generate_course_suggestions(self, course, course_data, course_analytics, now):
-        suggestions = []
-        
-        # Prioritize assignments
-        priority_assignment = self._get_priority_assignment(course_data.get('assignments', []), now)
-        if priority_assignment:
-            due_date = self.parse_datetime(priority_assignment.get('due_at', ''))
-            days_until_due = (due_date - now).days
-            urgency = "urgent" if days_until_due <= 3 else "important"
-            suggestions.append(f"{urgency.capitalize()} for {course.name}: '{priority_assignment.get('name', 'Unnamed Assignment')}' due in {days_until_due} days. Start working on this soon!")
-        
-        # Analyze participation and engagement
-        if course_analytics.get('page_views') and course_analytics.get('participations'):
-            engagement_level = course_analytics['participations'] / course_analytics['page_views']
-            if engagement_level < 0.1:
-                suggestions.append(f"{course.name}: Your engagement seems low. Try to participate more in discussions and activities to enhance your learning experience.")
-        
-        # Identify improvement areas
-        low_grades = [g for g in course_data.get('grades', []) if g.get('score') and g['score'] < 70]
-        if low_grades:
-            worst_assignment = min(low_grades, key=lambda x: x['score'])
-            suggestions.append(f"{course.name}: Your lowest score ({worst_assignment['score']}%) is in '{worst_assignment.get('name', 'an unnamed assignment')}'. Focus on improving in this area and consider seeking help from your instructor or peers.")
-        
-        return suggestions
-
-    def _generate_learning_suggestion(self, user_analytics, courses):
+    def _generate_learning_suggestion(self, user_analytics, courses, suggestions):
         late_submissions = 0
         total_submissions = 0
         for course_analytics in user_analytics.values():
@@ -402,27 +427,29 @@ class EnhancedSuggestionGenerator:
         if total_submissions > 0:
             late_ratio = late_submissions / total_submissions
             if late_ratio > 0.2:
-                return f"You've submitted {late_submissions} out of {total_submissions} assignments late. Try setting personal deadlines 1-2 days before the actual due date to improve your on-time submission rate."
+                suggestions["Learning"].append(f"You've submitted {late_submissions} out of {total_submissions} assignments late. Set personal deadlines 2-3 days before the actual due date to improve your on-time submission rate and reduce stress.")
         
-        # Suggest resources based on course topics
         course_topics = [course.name.split(':')[0] for course in courses]
         if 'Math' in course_topics or 'Statistics' in course_topics:
-            return "For math-related courses, check out Khan Academy or MIT OpenCourseWare for additional explanations and practice problems."
+            suggestions["Learning"].append("For math-related courses, utilize Khan Academy or MIT OpenCourseWare for additional explanations and practice problems. Consider joining or forming a study group for collaborative problem-solving.")
         elif 'Computer Science' in course_topics or 'Programming' in course_topics:
-            return "For programming courses, platforms like Codecademy or LeetCode can provide extra coding practice and reinforce your skills."
+            suggestions["Learning"].append("For programming courses, practice coding daily on platforms like Codecademy or LeetCode. Build small projects to apply what you're learning and solidify your understanding.")
         
-        return "Explore additional resources like online tutorials, textbook supplements, or study groups to enhance your understanding across all your courses."
-
-    def _get_priority_assignment(self, assignments, now):
-        upcoming = [a for a in assignments if a.get('due_at') and self.parse_datetime(a['due_at']) > now]
-        if upcoming:
-            return min(upcoming, key=lambda x: self.parse_datetime(x['due_at']))
-        return None
+        suggestions["Learning"].append("Create a study schedule that includes regular reviews of past material, practice problems, and collaborative study sessions. Use various learning resources like online tutorials, textbook supplements, and study groups to reinforce your understanding across all courses.")
 
     def parse_datetime(self, date_string):
         if not date_string:
             return None
-        return datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+        try:
+            if isinstance(date_string, str):
+                dt = datetime.fromisoformat(date_string.replace('Z', '+00:00'))
+                return dt.replace(tzinfo=ZoneInfo("UTC"))
+            elif isinstance(date_string, datetime):
+                return date_string.replace(tzinfo=ZoneInfo("UTC")) if date_string.tzinfo is None else date_string
+            return None
+        except ValueError:
+            print(f"Unable to parse date string: {date_string}")
+            return None
 
 class ScheduleSuggestionSystem:
     def __init__(self):
@@ -446,13 +473,9 @@ class ScheduleSuggestionSystem:
                 user_analytics[course.course_id] = analytics
 
         dashboard_data = self.canvas.get_dashboard_data()
-        canvas_calendar_events = self.canvas.get_calendar_events(datetime.now(), datetime.now() + timedelta(days=30))
-        
-        # Combine Canvas calendar events with Google Calendar events
-        all_calendar_events = canvas_calendar_events + google_calendar_events
 
         return self.suggestion_generator.generate_suggestions(
-            student.courses, course_details, dashboard_data, all_calendar_events, user_analytics
+            student.courses, course_details, dashboard_data, google_calendar_events, user_analytics
         )
 system = ScheduleSuggestionSystem()
 
@@ -476,7 +499,7 @@ SCOPES = [
 flow = Flow.from_client_secrets_file(
     CLIENT_SECRETS_FILE,
     scopes=SCOPES,
-    redirect_uri='http://localhost:8080/oauth2callback'
+    redirect_uri='https://localhost:8080/oauth2callback'
 )
 
 @app.route('/')
@@ -514,7 +537,6 @@ def authorize():
         include_granted_scopes='true'
     )
     session['state'] = state
-    print(f"Authorization URL: {authorization_url}")  # Add this line
     return redirect(authorization_url)
 
 @app.route('/check_session')
@@ -566,14 +588,46 @@ def get_calendar_service():
     
     return build('calendar', 'v3', credentials=credentials)
 
-# Update your existing get_suggestions route
+
+
 @app.route('/get_suggestions')
 def get_suggestions():
-    if 'credentials' not in session:
-        return redirect(url_for('authorize'))
+    def get_nocodeapi_calendar_events():
+        try:
+            url = "https://v1.nocodeapi.com/ommistry/calendar/uIJAtQBXWzuolwnf/listEvents"
+            now = datetime.now(ZoneInfo("UTC"))
+            params = {
+                'calendarId': 'primary',
+                'timeMin': now.isoformat(),
+                'timeMax': (now + timedelta(days=30)).isoformat(),
+                'singleEvents': 'true',
+                'orderBy': 'startTime',
+                'maxResults': '100'
+            }
+            response = requests.get(url, params=params)
+            if response.status_code == 200:
+                events = response.json().get('items', [])
+                print(f"Retrieved {len(events)} events from Google Calendar")
+                return events
+            else:
+                print(f"Failed to retrieve calendar events from NoCodeAPI: {response.status_code}")
+                print(f"Response content: {response.text}")
+                return []
+        except Exception as e:
+            print(f"Error retrieving calendar events: {str(e)}")
+            return []
+
+    # Fetch Google Calendar events using NoCodeAPI
+    google_calendar_events = get_nocodeapi_calendar_events()
     
-    calendar_service = get_calendar_service()
-    
+    # Debug: Print the number of events and the first few events
+    print(f"Number of calendar events: {len(google_calendar_events)}")
+    if google_calendar_events:
+        for event in google_calendar_events[:3]:
+            print(json.dumps(event, indent=2))
+    else:
+        print("No calendar events retrieved.")
+
     # Your existing code for generating suggestions
     student = Student("Test Student", "test@example.com")
     canvas_courses = system.get_canvas_courses()
@@ -589,21 +643,29 @@ def get_suggestions():
         )
         student.courses.append(course)
 
-    # Get Google Calendar events
-    now = datetime.utcnow().isoformat() + 'Z'
-    events_result = calendar_service.events().list(calendarId='primary', timeMin=now,
-                                                   maxResults=10, singleEvents=True,
-                                                   orderBy='startTime').execute()
-    google_calendar_events = events_result.get('items', [])
+    # Generate suggestions using Canvas data and NoCodeAPI Google Calendar events
+    try:
+        suggestions = system.generate_suggestions(student, google_calendar_events)
+    except Exception as e:
+        print(f"Error generating suggestions: {str(e)}")
+        return jsonify({"error": "An error occurred while generating suggestions."}), 500
 
-    # Generate suggestions using both Canvas and Calendar data
-    suggestions = system.generate_suggestions(student, google_calendar_events)
+    # Generate HTML for suggestions
+    html_content = """
+    <h2>Your Personalized Suggestions:</h2>
+    {% for category, category_suggestions in suggestions.items() %}
+        {% if category_suggestions %}
+            <h3>{{ category }}:</h3>
+            <ul>
+            {% for suggestion in category_suggestions %}
+                <li>{{ suggestion }}</li>
+            {% endfor %}
+            </ul>
+        {% endif %}
+    {% endfor %}
+    """
+    return render_template_string(html_content, suggestions=suggestions)
 
-    suggestion_list = "<ul>"
-    for suggestion in suggestions:
-        suggestion_list += f"<li>{suggestion}</li>"
-    suggestion_list += "</ul>"
-    return f"<h2>Your Personalized Suggestions:</h2>{suggestion_list}"
 
 @app.route('/debug')
 def debug():
